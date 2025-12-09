@@ -37,15 +37,29 @@ import {
   X,
   Trash2, 
   Plus,
-  AlertTriangle // 新增：警告圖示
+  AlertTriangle 
 } from 'lucide-react';
 
-// --- Firebase 初始化 ---
-const firebaseConfig = JSON.parse(__firebase_config);
+// --- Firebase 初始化設定 ---
+// ⚠️ 重要：部署到 GitHub/Vercel 時，請用您的設定取代下方的空字串
+// 步驟：
+// 1. 去 firebase.console.google.com 建立專案
+// 2. 新增 Web App 取得設定碼
+// 3. 貼上如下：
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+  apiKey: "AIzaSyDFSRvnMrdVvS6YhR8Xsa3jc43fwquuXsU",
+  authDomain: "foot-health-check.firebaseapp.com",
+  projectId: "foot-health-check",
+  storageBucket: "foot-health-check.firebasestorage.app",
+  messagingSenderId: "416667479238",
+  appId: "1:416667479238:web:864fbcfaa361ac48903bc7"
+};
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+// 若是部署到自己的環境，appId 可以自訂一個字串，或直接用 'foot-health-app'
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'foot-health-event-2025';
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -61,7 +75,7 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminCodeInput, setAdminCodeInput] = useState('');
-  const [loginError, setLoginError] = useState(''); // 新增：登入錯誤訊息狀態
+  const [loginError, setLoginError] = useState(''); 
 
   const [registrations, setRegistrations] = useState([]);
   const [editingCapacity, setEditingCapacity] = useState({}); 
@@ -77,7 +91,7 @@ export default function App() {
   });
 
   // 新增：刪除確認視窗狀態
-  const [deleteTarget, setDeleteTarget] = useState(null); // { id, sessionId, name }
+  const [deleteTarget, setDeleteTarget] = useState(null); 
 
   // 表單狀態 (前台使用者用)
   const [formData, setFormData] = useState({
@@ -99,6 +113,10 @@ export default function App() {
         }
       } catch (error) {
         console.error("Auth error:", error);
+        // 如果是在部署環境且未設定好 Firebase，這裡會報錯，可以在這裡提示使用者
+        if (typeof __firebase_config === 'undefined') {
+             console.error("請確認是否已填入正確的 firebaseConfig");
+        }
       }
     };
     initAuth();
@@ -117,24 +135,29 @@ export default function App() {
     const sessionsRef = collection(db, 'artifacts', appId, 'public', 'data', collectionName);
 
     const seedInitialData = async () => {
-      const snapshot = await getDocs(sessionsRef);
-      if (snapshot.empty) {
-        const batch = writeBatch(db);
-        const initialSessions = [
-          { name: '14:00~14:30', capacity: 9, registered: 0, order: 1 },
-          { name: '14:30~15:00', capacity: 8, registered: 0, order: 2 },
-          { name: '15:00~15:30', capacity: 9, registered: 0, order: 3 },
-          { name: '15:30~16:00', capacity: 8, registered: 0, order: 4 },
-          { name: '16:00~16:30', capacity: 8, registered: 0, order: 5 },
-          { name: '16:30~17:00', capacity: 8, registered: 0, order: 6 }
-        ];
-        
-        initialSessions.forEach(session => {
-          const newDocRef = doc(sessionsRef);
-          batch.set(newDocRef, session);
-        });
-        
-        await batch.commit();
+      try {
+        const snapshot = await getDocs(sessionsRef);
+        if (snapshot.empty) {
+          const batch = writeBatch(db);
+          const initialSessions = [
+            { name: '14:00~14:30', capacity: 9, registered: 0, order: 1 },
+            { name: '14:30~15:00', capacity: 8, registered: 0, order: 2 },
+            { name: '15:00~15:30', capacity: 9, registered: 0, order: 3 },
+            { name: '15:30~16:00', capacity: 8, registered: 0, order: 4 },
+            { name: '16:00~16:30', capacity: 8, registered: 0, order: 5 },
+            { name: '16:30~17:00', capacity: 8, registered: 0, order: 6 }
+          ];
+          
+          initialSessions.forEach(session => {
+            const newDocRef = doc(sessionsRef);
+            batch.set(newDocRef, session);
+          });
+          
+          await batch.commit();
+        }
+      } catch (error) {
+        console.error("Initialization error:", error);
+        // 通常是 Firestore 權限沒開或 Config 錯誤
       }
     };
 
