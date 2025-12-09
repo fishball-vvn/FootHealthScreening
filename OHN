@@ -1,0 +1,905 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  onAuthStateChanged,
+  signInWithCustomToken
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  onSnapshot, 
+  getDocs,
+  writeBatch,
+  increment,
+  query,
+  orderBy
+} from 'firebase/firestore';
+import { 
+  User, 
+  Calendar, 
+  CheckCircle, 
+  AlertCircle,
+  Users,
+  Briefcase,
+  CreditCard,
+  Settings,
+  List,
+  Save,
+  ArrowLeft,
+  Lock,
+  MapPin,
+  X,
+  Trash2, 
+  Plus,
+  AlertTriangle // 新增：警告圖示
+} from 'lucide-react';
+
+// --- Firebase 初始化 ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [sessions, setSessions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [notification, setNotification] = useState(null);
+  
+  // 狀態：成功彈窗
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+
+  // 管理後台狀態
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [adminCodeInput, setAdminCodeInput] = useState('');
+  const [loginError, setLoginError] = useState(''); // 新增：登入錯誤訊息狀態
+
+  const [registrations, setRegistrations] = useState([]);
+  const [editingCapacity, setEditingCapacity] = useState({}); 
+  
+  // 管理員手動新增視窗狀態
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [adminAddForm, setAdminAddForm] = useState({
+    employeeId: '',
+    department: '',
+    name: '',
+    sessionId: '',
+    footFeeling: 'Not specified (Admin added)'
+  });
+
+  // 新增：刪除確認視窗狀態
+  const [deleteTarget, setDeleteTarget] = useState(null); // { id, sessionId, name }
+
+  // 表單狀態 (前台使用者用)
+  const [formData, setFormData] = useState({
+    employeeId: '',
+    department: '',
+    name: '',
+    sessionId: '',
+    footFeeling: ''
+  });
+
+  // 1. 處理身份驗證
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth error:", error);
+      }
+    };
+    initAuth();
+    
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 2. 監聽活動梯次資料
+  useEffect(() => {
+    if (!user) return;
+
+    const collectionName = 'foot_analysis_sessions'; 
+    const sessionsRef = collection(db, 'artifacts', appId, 'public', 'data', collectionName);
+
+    const seedInitialData = async () => {
+      const snapshot = await getDocs(sessionsRef);
+      if (snapshot.empty) {
+        const batch = writeBatch(db);
+        const initialSessions = [
+          { name: '14:00~14:30', capacity: 9, registered: 0, order: 1 },
+          { name: '14:30~15:00', capacity: 8, registered: 0, order: 2 },
+          { name: '15:00~15:30', capacity: 9, registered: 0, order: 3 },
+          { name: '15:30~16:00', capacity: 8, registered: 0, order: 4 },
+          { name: '16:00~16:30', capacity: 8, registered: 0, order: 5 },
+          { name: '16:30~17:00', capacity: 8, registered: 0, order: 6 }
+        ];
+        
+        initialSessions.forEach(session => {
+          const newDocRef = doc(sessionsRef);
+          batch.set(newDocRef, session);
+        });
+        
+        await batch.commit();
+      }
+    };
+
+    seedInitialData();
+
+    const unsubscribe = onSnapshot(sessionsRef, (snapshot) => {
+      const sessionsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      sessionsData.sort((a, b) => a.order - b.order);
+      setSessions(sessionsData);
+      setLoading(false);
+    }, (error) => {
+      console.error("Error fetching sessions:", error);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // 3. 監聽報名資料 (僅在 Admin 模式下觸發)
+  useEffect(() => {
+    if (!user || !isAdmin) return;
+
+    const regsRef = collection(db, 'artifacts', appId, 'public', 'data', 'foot_analysis_registrations');
+    const q = query(regsRef, orderBy('createdAt', 'desc'));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const regsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setRegistrations(regsData);
+    });
+
+    return () => unsubscribe();
+  }, [user, isAdmin]);
+
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  const handleSelectSession = (sessionId) => {
+    setFormData(prev => ({ ...prev, sessionId }));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.sessionId) {
+      setNotification({ type: 'error', message: '請選擇一個檢測時段 / Please select a session time' });
+      return;
+    }
+
+    setSubmitting(true);
+    setNotification(null);
+
+    try {
+      const sessionRef = doc(db, 'artifacts', appId, 'public', 'data', 'foot_analysis_sessions', formData.sessionId);
+      const targetSession = sessions.find(s => s.id === formData.sessionId);
+      
+      if (!targetSession || targetSession.registered >= targetSession.capacity) {
+        throw new Error('該時段已額滿，請選擇其他時段 / This session is full');
+      }
+
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'foot_analysis_registrations'), {
+        ...formData,
+        userId: user.uid,
+        createdAt: new Date().toISOString()
+      });
+
+      await updateDoc(sessionRef, {
+        registered: increment(1)
+      });
+
+      setShowSuccessModal(true);
+      
+      setFormData({
+        employeeId: '',
+        department: '',
+        name: '',
+        sessionId: '',
+        footFeeling: ''
+      });
+
+    } catch (error) {
+      console.error("Registration error:", error);
+      setNotification({ type: 'error', message: error.message || 'Error occurred' });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // --- Admin Functions ---
+  const handleUpdateCapacity = async (sessionId, currentCapacity) => {
+    const newCap = editingCapacity[sessionId];
+    if (newCap === undefined || newCap === '' || parseInt(newCap) < 0) return;
+    
+    try {
+      const sessionRef = doc(db, 'artifacts', appId, 'public', 'data', 'foot_analysis_sessions', sessionId);
+      await updateDoc(sessionRef, {
+        capacity: parseInt(newCap)
+      });
+      setEditingCapacity(prev => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+      // 成功不彈窗，直接更新 UI 即可
+    } catch (error) {
+      console.error('Update capacity error:', error);
+    }
+  };
+
+  // 觸發刪除確認視窗
+  const initiateDelete = (regId, sessionId, regName) => {
+    setDeleteTarget({ id: regId, sessionId, name: regName });
+  };
+
+  // 執行刪除
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+
+    try {
+      // 1. 刪除報名文件
+      const regRef = doc(db, 'artifacts', appId, 'public', 'data', 'foot_analysis_registrations', deleteTarget.id);
+      await deleteDoc(regRef);
+
+      // 2. 更新梯次人數 (減 1)
+      if (deleteTarget.sessionId) {
+        const sessionRef = doc(db, 'artifacts', appId, 'public', 'data', 'foot_analysis_sessions', deleteTarget.sessionId);
+        await updateDoc(sessionRef, {
+          registered: increment(-1)
+        });
+      }
+
+      setDeleteTarget(null); // 關閉視窗
+    } catch (error) {
+      console.error('Delete error:', error);
+      // 這裡可以選擇顯示錯誤訊息
+    }
+  };
+
+  // 管理員手動新增提交
+  const handleAdminAddSubmit = async (e) => {
+    e.preventDefault();
+    if (!adminAddForm.sessionId) {
+      // 改用 UI 顯示錯誤而非 alert
+      return; 
+    }
+
+    try {
+      const sessionRef = doc(db, 'artifacts', appId, 'public', 'data', 'foot_analysis_sessions', adminAddForm.sessionId);
+      
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'foot_analysis_registrations'), {
+        ...adminAddForm,
+        userId: 'admin-added',
+        createdAt: new Date().toISOString()
+      });
+
+      await updateDoc(sessionRef, {
+        registered: increment(1)
+      });
+
+      setShowAddModal(false);
+      setAdminAddForm({
+        employeeId: '',
+        department: '',
+        name: '',
+        sessionId: '',
+        footFeeling: 'Not specified (Admin added)'
+      });
+
+    } catch (error) {
+      console.error("Admin add error:", error);
+    }
+  };
+
+  const handleAdminLoginSubmit = (e) => {
+    e.preventDefault();
+    if (adminCodeInput === '0717') {
+      setIsAdmin(true);
+      setShowAdminLogin(false);
+      setAdminCodeInput('');
+      setLoginError('');
+    } else {
+      setLoginError('驗證碼錯誤 (Invalid Code)');
+      setAdminCodeInput('');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-teal-600 flex flex-col items-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-600 mb-2"></div>
+          Loading...
+        </div>
+      </div>
+    );
+  }
+
+  // --- Admin View Render ---
+  if (isAdmin) {
+    return (
+      <div className="min-h-screen bg-gray-100 p-4 sm:p-8 font-sans">
+        <div className="max-w-6xl mx-auto">
+          <div className="flex justify-between items-center mb-6">
+            <h1 className="text-2xl font-bold text-gray-800 flex items-center">
+              <Settings className="mr-2" /> 管理員後台 (Admin Dashboard)
+            </h1>
+            <button 
+              onClick={() => setIsAdmin(false)}
+              className="flex items-center px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+            >
+              <ArrowLeft size={18} className="mr-2" /> 返回報名頁
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* 1. 梯次管理 */}
+            <div className="bg-white p-6 rounded-xl shadow-sm">
+              <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
+                <Calendar className="mr-2" size={20} /> 梯次名額管理
+              </h2>
+              <div className="space-y-4 max-h-[500px] overflow-y-auto">
+                {sessions.map(session => {
+                  const remaining = session.capacity - session.registered;
+                  return (
+                    <div key={session.id} className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 border rounded-lg bg-gray-50 gap-4">
+                      <div>
+                        <div className="font-bold text-gray-800 text-lg mb-1">{session.name}</div>
+                        <div className="flex space-x-4 text-sm">
+                          <span className="text-gray-600">已報名: <span className="text-teal-600 font-bold">{session.registered}</span></span>
+                          <span className={`${remaining < 2 ? 'text-red-500 font-bold' : 'text-gray-600'}`}>
+                            剩餘: <span className="font-bold">{remaining}</span>
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center w-full sm:w-auto bg-white p-2 rounded border">
+                        <span className="text-sm text-gray-500 mr-2 whitespace-nowrap">總名額:</span>
+                        <input 
+                          type="number"
+                          className="w-16 p-1 border rounded text-center mr-2 text-gray-800"
+                          value={editingCapacity[session.id] !== undefined ? editingCapacity[session.id] : session.capacity}
+                          onChange={(e) => setEditingCapacity({...editingCapacity, [session.id]: e.target.value})}
+                        />
+                        {editingCapacity[session.id] !== undefined && editingCapacity[session.id] != session.capacity && (
+                          <button 
+                            onClick={() => handleUpdateCapacity(session.id)}
+                            className="p-1.5 bg-teal-600 text-white rounded hover:bg-teal-700"
+                            title="儲存變更"
+                          >
+                            <Save size={16} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 2. 報名名單 */}
+            <div className="bg-white p-6 rounded-xl shadow-sm overflow-hidden flex flex-col h-[600px]">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg font-bold text-gray-800 flex items-center">
+                  <List className="mr-2" size={20} /> 最新報名資料 ({registrations.length})
+                </h2>
+                <button
+                  onClick={() => setShowAddModal(true)}
+                  className="flex items-center px-3 py-1.5 bg-teal-600 text-white text-sm rounded-lg hover:bg-teal-700 transition-colors"
+                >
+                  <Plus size={16} className="mr-1" /> 手動新增
+                </button>
+              </div>
+              
+              <div className="overflow-x-auto flex-1">
+                <table className="min-w-full text-sm text-left">
+                  <thead className="bg-gray-100 text-gray-600 font-medium sticky top-0">
+                    <tr>
+                      <th className="p-3">姓名</th>
+                      <th className="p-3">員編</th>
+                      <th className="p-3">部門</th>
+                      <th className="p-3">時段</th>
+                      <th className="p-3 text-center">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {registrations.map(reg => {
+                      const sessionName = sessions.find(s => s.id === reg.sessionId)?.name || 'Unknown';
+                      return (
+                        <tr key={reg.id} className="hover:bg-gray-50">
+                          <td className="p-3 font-medium">{reg.name}</td>
+                          <td className="p-3">{reg.employeeId}</td>
+                          <td className="p-3">{reg.department}</td>
+                          <td className="p-3 text-teal-600">{sessionName}</td>
+                          <td className="p-3 text-center">
+                            <button
+                              onClick={() => initiateDelete(reg.id, reg.sessionId, reg.name)}
+                              className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors border border-transparent hover:border-red-200"
+                              title="刪除此筆報名"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {registrations.length === 0 && (
+                      <tr>
+                        <td colSpan="5" className="p-4 text-center text-gray-400">尚無報名資料</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          {/* Delete Confirmation Modal (刪除確認視窗) */}
+          {deleteTarget && (
+             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 px-4">
+               <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm relative animate-in fade-in zoom-in duration-200">
+                 <div className="flex flex-col items-center text-center">
+                   <div className="bg-red-100 p-3 rounded-full mb-4">
+                     <AlertTriangle size={32} className="text-red-600" />
+                   </div>
+                   <h3 className="text-xl font-bold text-gray-900 mb-2">確定要刪除嗎？</h3>
+                   <p className="text-sm text-gray-500 mb-6">
+                     您即將刪除 <strong>{deleteTarget.name}</strong> 的報名資料。<br/>
+                     刪除後，該時段的名額將會自動釋出。
+                   </p>
+                   
+                   <div className="flex gap-3 w-full">
+                     <button
+                       onClick={() => setDeleteTarget(null)}
+                       className="flex-1 py-2.5 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 font-medium"
+                     >
+                       取消
+                     </button>
+                     <button
+                       onClick={confirmDelete}
+                       className="flex-1 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium shadow-sm"
+                     >
+                       確認刪除
+                     </button>
+                   </div>
+                 </div>
+               </div>
+             </div>
+          )}
+
+          {/* 手動新增 Modal */}
+          {showAddModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 px-4">
+              <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md relative">
+                <button 
+                  onClick={() => setShowAddModal(false)}
+                  className="absolute top-4 right-4 text-gray-400 hover:text-gray-600"
+                >
+                  <X size={20} />
+                </button>
+                <h3 className="text-xl font-bold text-gray-800 mb-4">手動新增報名</h3>
+                
+                <form onSubmit={handleAdminAddSubmit} className="space-y-4">
+                   <div>
+                    <label className="block text-sm font-medium text-gray-700">姓名 Name</label>
+                    <input
+                      type="text"
+                      required
+                      className="mt-1 block w-full border border-gray-300 rounded-md p-2"
+                      value={adminAddForm.name}
+                      onChange={e => setAdminAddForm({...adminAddForm, name: e.target.value})}
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">員編 ID</label>
+                      <input
+                        type="text"
+                        required
+                        className="mt-1 block w-full border border-gray-300 rounded-md p-2"
+                        value={adminAddForm.employeeId}
+                        onChange={e => setAdminAddForm({...adminAddForm, employeeId: e.target.value})}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">部門 Dept</label>
+                      <input
+                        type="text"
+                        required
+                        className="mt-1 block w-full border border-gray-300 rounded-md p-2"
+                        value={adminAddForm.department}
+                        onChange={e => setAdminAddForm({...adminAddForm, department: e.target.value})}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">選擇梯次 Session</label>
+                    <select
+                      required
+                      className="mt-1 block w-full border border-gray-300 rounded-md p-2 bg-white"
+                      value={adminAddForm.sessionId}
+                      onChange={e => setAdminAddForm({...adminAddForm, sessionId: e.target.value})}
+                    >
+                      <option value="">請選擇...</option>
+                      {sessions.map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} (剩 {s.capacity - s.registered})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">備註 (腳步感)</label>
+                    <input
+                      type="text"
+                      className="mt-1 block w-full border border-gray-300 rounded-md p-2"
+                      value={adminAddForm.footFeeling}
+                      onChange={e => setAdminAddForm({...adminAddForm, footFeeling: e.target.value})}
+                    />
+                  </div>
+
+                  <div className="pt-2 flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddModal(false)}
+                      className="flex-1 py-2 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50"
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="submit"
+                      className="flex-1 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700"
+                    >
+                      確認新增
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // --- User View Render ---
+  return (
+    <div className="min-h-screen bg-slate-50 py-8 px-4 sm:px-6 lg:px-8 font-sans">
+      <div className="max-w-4xl mx-auto">
+        
+        {/* Success Modal (報名成功彈窗) */}
+        {showSuccessModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 px-4 animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md text-center transform scale-100 transition-all">
+              <div className="flex justify-center mb-4">
+                <div className="bg-green-100 p-4 rounded-full">
+                  <CheckCircle size={48} className="text-green-600" />
+                </div>
+              </div>
+              
+              <h3 className="text-2xl font-bold text-gray-800 mb-2">
+                報名成功！
+              </h3>
+              <p className="text-gray-600 text-lg mb-4 font-medium">
+                Registration Confirmed!
+              </p>
+              
+              <div className="bg-gray-50 rounded-lg p-4 mb-6 border border-gray-100 text-left">
+                <div className="flex items-start text-gray-700 mb-2">
+                  <MapPin size={20} className="mr-2 mt-0.5 text-teal-600 shrink-0" />
+                  <div>
+                    <p className="font-bold">請準時前往 B 棟訓練教室。</p>
+                    <p className="text-sm text-gray-500">Please arrive at Bldg. B Training Room on time.</p>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setShowSuccessModal(false)}
+                className="w-full py-3 bg-teal-600 text-white rounded-xl font-bold hover:bg-teal-700 transition-colors shadow-lg shadow-teal-200"
+              >
+                好的，我知道了 (OK)
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Admin Login Modal */}
+        {showAdminLogin && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 px-4">
+            <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm relative">
+              <button 
+                onClick={() => { setShowAdminLogin(false); setLoginError(''); }}
+                className="absolute top-4 right-4 text-gray-400 hover:text-gray-600"
+              >
+                <X size={20} />
+              </button>
+              <div className="flex items-center justify-center mb-4 text-teal-600">
+                <div className="bg-teal-50 p-3 rounded-full">
+                  <Lock size={24} />
+                </div>
+              </div>
+              <h3 className="text-xl font-bold text-center text-gray-800 mb-2">管理員驗證</h3>
+              <p className="text-sm text-gray-500 text-center mb-6">Admin Authentication</p>
+              
+              <form onSubmit={handleAdminLoginSubmit}>
+                <input
+                  type="password"
+                  autoFocus
+                  className={`w-full border rounded-lg p-3 mb-2 text-center text-lg tracking-widest outline-none focus:ring-2 focus:ring-teal-500 
+                    ${loginError ? 'border-red-500 bg-red-50' : 'border-gray-300'}`}
+                  placeholder="請輸入認證碼 (Code)"
+                  value={adminCodeInput}
+                  onChange={(e) => setAdminCodeInput(e.target.value)}
+                />
+                
+                {/* 顯示錯誤訊息 */}
+                {loginError && (
+                  <p className="text-red-500 text-xs text-center mb-4 font-bold">{loginError}</p>
+                )}
+
+                <div className="flex gap-3 mt-4">
+                  <button
+                    type="submit"
+                    className="w-full py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors"
+                  >
+                    登入
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Header */}
+        <div className="bg-white rounded-2xl shadow-sm p-8 mb-6 border-l-4 border-teal-500">
+          <div className="flex justify-between items-start">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900 sm:text-3xl mb-2">
+                足部壓力檢測報名表
+              </h1>
+              <h2 className="text-xl text-gray-600 mb-4 font-medium">
+                Foot Health Pressure Analysis Registration
+              </h2>
+            </div>
+          </div>
+          
+          <div className="flex items-center text-teal-700 font-semibold mb-4 bg-teal-50 p-3 rounded-lg inline-block">
+             <Calendar className="mr-2 w-5 h-5"/> Dec. 17, 2025 | 14:00~17:00
+          </div>
+
+          <div className="space-y-1 text-sm text-gray-600 border-t pt-4">
+            <p>1. 請填寫以下資訊以預約您的專屬檢測時段 (Please fill out the form below to reserve your screening session)</p>
+            <p>2. 檢測時間約需 15-20 分鐘 (The assessment takes 15-20 minutes)</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          
+          {/* 左側：表單填寫區 */}
+          <div className="lg:col-span-7 space-y-6">
+            <form onSubmit={handleSubmit} className="bg-white shadow-sm rounded-2xl p-6 sm:p-8">
+              
+              <div className="mb-6 border-b pb-2">
+                <h3 className="text-lg font-bold text-gray-800">基本資料 / Basic Info</h3>
+                <p className="text-xs text-gray-400">當您提交此表單時，不會自動收集額外數據。</p>
+              </div>
+
+              {notification && (
+                <div className={`mb-6 p-4 rounded-lg flex items-start ${notification.type === 'success' ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+                  {notification.type === 'success' ? <CheckCircle className="mt-0.5 mr-2 shrink-0" size={20}/> : <AlertCircle className="mt-0.5 mr-2 shrink-0" size={20}/>}
+                  {notification.message}
+                </div>
+              )}
+
+              <div className="space-y-5">
+                {/* 1. 員編 */}
+                <div>
+                  <label htmlFor="employeeId" className="block text-sm font-bold text-gray-700 mb-1">
+                    1. 員編 Employee ID <span className="text-red-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
+                      <CreditCard size={18} />
+                    </div>
+                    <input
+                      type="text"
+                      name="employeeId"
+                      id="employeeId"
+                      required
+                      value={formData.employeeId}
+                      onChange={handleInputChange}
+                      className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500"
+                      placeholder="e.g., TW01234"
+                    />
+                  </div>
+                </div>
+
+                {/* 2. 部門 */}
+                <div>
+                  <label htmlFor="department" className="block text-sm font-bold text-gray-700 mb-1">
+                    2. 部門 Department <span className="text-red-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
+                      <Briefcase size={18} />
+                    </div>
+                    <input
+                      type="text"
+                      name="department"
+                      id="department"
+                      required
+                      value={formData.department}
+                      onChange={handleInputChange}
+                      className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500"
+                      placeholder="e.g., SMT"
+                    />
+                  </div>
+                </div>
+
+                {/* 3. 姓名 */}
+                <div>
+                  <label htmlFor="name" className="block text-sm font-bold text-gray-700 mb-1">
+                    3. 姓名 Full Name <span className="text-red-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
+                      <User size={18} />
+                    </div>
+                    <input
+                      type="text"
+                      name="name"
+                      id="name"
+                      required
+                      value={formData.name}
+                      onChange={handleInputChange}
+                      className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500"
+                    />
+                  </div>
+                </div>
+
+                {/* 4. 腳步感受 */}
+                <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                  <label className="block text-sm font-bold text-gray-700 mb-3">
+                    4. 你現在覺得腳步沉重嗎 <br/>
+                    <span className="font-normal text-gray-500">Do your feet feel heavy right now?</span>
+                  </label>
+                  
+                  <div className="space-y-2">
+                    {[
+                      { val: 'Light', label: '輕盈得像要飛起來 Light as a feather' },
+                      { val: 'Sore', label: '有點痠，需要被拯救 A bit sore, save me!' },
+                      { val: 'Heavy', label: '重到像綁了鉛塊... Heavy as lead...' }
+                    ].map((opt) => (
+                      <label key={opt.val} className="flex items-center p-3 border rounded-lg bg-white cursor-pointer hover:bg-teal-50 hover:border-teal-300 transition-colors">
+                        <input
+                          type="radio"
+                          name="footFeeling"
+                          value={opt.val}
+                          checked={formData.footFeeling === opt.val}
+                          onChange={handleInputChange}
+                          className="h-4 w-4 text-teal-600 focus:ring-teal-500 border-gray-300"
+                        />
+                        <span className="ml-3 text-sm text-gray-700">{opt.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div> 
+
+              <div className="pt-4 border-t mt-6">
+                <div className="flex items-center justify-between mb-4 bg-teal-50 p-4 rounded-lg">
+                  <div>
+                    <span className="block text-xs text-teal-600 font-bold uppercase tracking-wider">Selected Session</span>
+                    <span className="font-bold text-gray-800 text-lg">
+                      {sessions.find(s => s.id === formData.sessionId)?.name || '尚未選擇 / None'}
+                    </span>
+                  </div>
+                  {formData.sessionId && <CheckCircle className="text-teal-600" />}
+                </div>
+                
+                <button
+                  type="submit"
+                  disabled={submitting || !formData.sessionId}
+                  className={`
+                    w-full flex justify-center py-4 px-4 border border-transparent rounded-xl shadow-sm text-base font-bold text-white 
+                    transition-all duration-200
+                    ${submitting || !formData.sessionId 
+                      ? 'bg-gray-400 cursor-not-allowed' 
+                      : 'bg-teal-600 hover:bg-teal-700 focus:ring-4 focus:ring-teal-200 shadow-teal-200'}
+                  `}
+                >
+                  {submitting ? '處理中 Processing...' : '提交 Submit'}
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* 右側：梯次選擇 */}
+          <div className="lg:col-span-5">
+            <div className="bg-white shadow-sm rounded-2xl p-6 sticky top-6">
+              <h3 className="text-lg font-bold text-gray-800 mb-1">
+                檢測梯次
+              </h3>
+              <p className="text-sm text-gray-500 mb-4">Preferred Session Time</p>
+              
+              <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
+                {sessions.map((session) => {
+                  const remaining = session.capacity - session.registered;
+                  const isFull = remaining <= 0;
+                  const isSelected = formData.sessionId === session.id;
+
+                  return (
+                    <div 
+                      key={session.id}
+                      onClick={() => !isFull && handleSelectSession(session.id)}
+                      className={`
+                        p-3 rounded-xl border transition-all cursor-pointer relative
+                        ${isFull 
+                          ? 'bg-gray-100 border-gray-200 opacity-60 cursor-not-allowed' 
+                          : isSelected 
+                            ? 'border-teal-500 bg-teal-50 ring-1 ring-teal-500' 
+                            : 'border-gray-200 hover:border-teal-300 hover:shadow-md'}
+                      `}
+                    >
+                      <div className="flex justify-between items-center mb-1">
+                        <span className={`font-bold text-sm ${isFull ? 'text-gray-500' : 'text-gray-800'}`}>
+                          {session.name}
+                        </span>
+                      </div>
+                      
+                      <div className="flex justify-between items-center text-xs">
+                        <span className={`flex items-center font-medium ${isFull ? 'text-red-500' : 'text-teal-600'}`}>
+                          {isFull ? (
+                            <>已額滿 Full</>
+                          ) : (
+                            <>剩餘 {remaining} 個名額 / {remaining} spots left</>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+        </div>
+        
+        {/* Footer & Admin Toggle */}
+        <div className="mt-12 py-6 border-t border-gray-200 flex flex-col items-center">
+          <p className="text-gray-400 text-sm mb-2">© 2025 Health Analysis Event</p>
+          <button 
+            onClick={() => { setShowAdminLogin(true); setLoginError(''); }}
+            className="text-xs text-gray-300 hover:text-teal-600 transition-colors flex items-center"
+          >
+            <Settings size={12} className="mr-1" /> 管理員登入 (Admin Login)
+          </button>
+        </div>
+
+      </div>
+    </div>
+  );
+}
